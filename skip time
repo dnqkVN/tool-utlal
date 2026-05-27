@@ -1,0 +1,455 @@
+// ==UserScript==
+// @name         claude v5 — Deep Warp
+// @namespace    http://tampermonkey.net/
+// @version      5.0.0
+// @description  Fake +25h (full Date warp) + Skip 5s (RAF freeze + timer nuke). Works universally.
+// @author       TimeHacker
+// @match        *://*/*
+// @grant        none
+// @run-at       document-start
+// ==/UserScript==
+
+/* ============================================================
+   STRATEGY v5:
+   1. Date hook: Proxy + defineProperty(configurable:true) — stealth
+   2. Skip 5s:  KHÔNG chỉ track timer mới — mà FREEZE toàn bộ
+      bằng cách override requestAnimationFrame + performance.now
+      + tạo "time jump" 5000ms trong performance timeline
+   3. Panel: all:initial CSS isolation, không bị trang xóa
+   ============================================================ */
+
+(function () {
+    'use strict';
+
+    // ─────────────────────────────────────────────────────────
+    // 0. CAPTURE ORIGINALS — ngay lập tức, trước tất cả
+    // ─────────────────────────────────────────────────────────
+    const O = {
+        Date:          window.Date,
+        dateNow:       window.Date.now.bind(window.Date),
+        setTimeout:    window.setTimeout.bind(window),
+        setInterval:   window.setInterval.bind(window),
+        clearTimeout:  window.clearTimeout.bind(window),
+        clearInterval: window.clearInterval.bind(window),
+        perfNow:       performance.now.bind(performance),
+        rAF:           window.requestAnimationFrame.bind(window),
+        cAF:           window.cancelAnimationFrame.bind(window),
+        // Promise để micro-task
+        Promise:       window.Promise,
+    };
+
+    // ─────────────────────────────────────────────────────────
+    // 1. CONFIG & STATE
+    // ─────────────────────────────────────────────────────────
+    const OFFSET_H   = 25 * 3600 * 1000;   // 25 giờ ms
+    const SKIP_MS    = 5000;                // 5 giây
+    const KEY_ON     = 'th5_on';
+    const KEY_POS    = 'th5_pos';
+
+    let fakeOn       = false;               // toggle fake+25h
+    let perfOffset   = 0;                   // extra offset cho performance.now (skip)
+    let timerMap     = new Map();           // fakeId → {nid, type, fn, args, deadline, delay}
+    let seq          = 1;
+
+    // ─────────────────────────────────────────────────────────
+    // 2. STORAGE
+    // ─────────────────────────────────────────────────────────
+    const LS = {
+        get:(k,f=null)=>{ try{const v=localStorage.getItem(k);return v!=null?JSON.parse(v):f;}catch(e){return f;}},
+        set:(k,v)=>{ try{localStorage.setItem(k,JSON.stringify(v));}catch(e){} },
+    };
+
+    // ─────────────────────────────────────────────────────────
+    // 3. LOGGER
+    // ─────────────────────────────────────────────────────────
+    const cs  = 'background:#001020;color:#00ffcc;font-weight:700;padding:1px 6px;border-radius:3px;';
+    const cr  = 'color:inherit;font-weight:400;';
+    const log  = (m,...a)=>{ try{console.log (`%c[TH5]%c ${m}`,cs,cr,...a);}catch(e){} };
+    const warn = (m,...a)=>{ try{console.warn(`%c[TH5]%c ⚠ ${m}`,cs,cr,...a);}catch(e){} };
+
+    // ─────────────────────────────────────────────────────────
+    // 4. DATE HOOK — stealth Proxy
+    // ─────────────────────────────────────────────────────────
+    function hookDate() {
+        try {
+            const Orig = O.Date;
+            const now0 = O.dateNow;
+            const off  = ()=> fakeOn ? OFFSET_H : 0;
+
+            // Constructor wrapper
+            function FakeDate(...args) {
+                const inst = args.length === 0
+                    ? new Orig(now0() + off())
+                    : new Orig(...args);
+                Object.setPrototypeOf(inst, FakeDate.prototype);
+                return inst;
+            }
+
+            FakeDate.prototype = Object.create(Orig.prototype);
+            FakeDate.prototype.constructor = FakeDate;
+
+            // Wrap instance methods
+            const wm = (name, fn) => {
+                try {
+                    Object.defineProperty(FakeDate.prototype, name, {
+                        value: fn, writable:true, configurable:true, enumerable:false
+                    });
+                } catch(e){}
+            };
+
+            wm('getTime',            function(){ return Orig.prototype.getTime.call(this) + off(); });
+            wm('valueOf',            function(){ return this.getTime(); });
+            wm('[Symbol.toPrimitive]',function(h){ return h==='number'?this.getTime():this.toString(); });
+            wm('getFullYear',        function(){ return new Orig(this.getTime()).getFullYear(); });
+            wm('getMonth',           function(){ return new Orig(this.getTime()).getMonth(); });
+            wm('getDate',            function(){ return new Orig(this.getTime()).getDate(); });
+            wm('getDay',             function(){ return new Orig(this.getTime()).getDay(); });
+            wm('getHours',           function(){ return new Orig(this.getTime()).getHours(); });
+            wm('getMinutes',         function(){ return new Orig(this.getTime()).getMinutes(); });
+            wm('getSeconds',         function(){ return new Orig(this.getTime()).getSeconds(); });
+            wm('getMilliseconds',    function(){ return new Orig(this.getTime()).getMilliseconds(); });
+            wm('getTimezoneOffset',  function(){ return new Orig(this.getTime()).getTimezoneOffset(); });
+            wm('toISOString',        function(){ return new Orig(this.getTime()).toISOString(); });
+            wm('toJSON',             function(){ return new Orig(this.getTime()).toJSON(); });
+            wm('toString',           function(){ return new Orig(this.getTime()).toString(); });
+            wm('toUTCString',        function(){ return new Orig(this.getTime()).toUTCString(); });
+            wm('toDateString',       function(){ return new Orig(this.getTime()).toDateString(); });
+            wm('toTimeString',       function(){ return new Orig(this.getTime()).toTimeString(); });
+            wm('toLocaleDateString', function(...a){ return new Orig(this.getTime()).toLocaleDateString(...a); });
+            wm('toLocaleTimeString', function(...a){ return new Orig(this.getTime()).toLocaleTimeString(...a); });
+            wm('toLocaleString',     function(...a){ return new Orig(this.getTime()).toLocaleString(...a); });
+
+            // UTC getters (không offset — UTC không đổi)
+            ['getUTCFullYear','getUTCMonth','getUTCDate','getUTCDay',
+             'getUTCHours','getUTCMinutes','getUTCSeconds','getUTCMilliseconds'
+            ].forEach(name => {
+                wm(name, function(){ return Orig.prototype[name].call(this); });
+            });
+
+            // Setters — delegate thẳng
+            ['setTime','setFullYear','setMonth','setDate','setHours','setMinutes',
+             'setSeconds','setMilliseconds','setUTCFullYear','setUTCMonth','setUTCDate',
+             'setUTCHours','setUTCMinutes','setUTCSeconds','setUTCMilliseconds'
+            ].forEach(name => {
+                wm(name, function(...a){ return Orig.prototype[name].apply(this,a); });
+            });
+
+            // Statics
+            FakeDate.now   = ()=> now0() + off();
+            FakeDate.parse = Orig.parse.bind(Orig);
+            FakeDate.UTC   = Orig.UTC.bind(Orig);
+
+            // Giả danh tính
+            try { Object.defineProperty(FakeDate,'name',{value:'Date',configurable:true}); } catch(e){}
+            try { FakeDate.toString = ()=>Orig.toString(); } catch(e){}
+
+            // Ghi đè window.Date
+            try {
+                Object.defineProperty(window,'Date',{
+                    value:FakeDate, writable:true, configurable:true, enumerable:true
+                });
+            } catch(e){ window.Date = FakeDate; }
+
+            log('Date hook ✔');
+        } catch(e){ warn('Date hook err:',e); }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 5. PERFORMANCE.NOW HOOK — cần cho Skip 5s
+    //    performance.now() + perfOffset → timer của trang bị
+    //    nghĩ rằng thời gian đã trôi qua nhiều hơn thực tế
+    // ─────────────────────────────────────────────────────────
+    function hookPerfNow() {
+        try {
+            const orig = O.perfNow;
+            const fakePerfNow = function() {
+                return orig() + perfOffset;
+            };
+            // Bind đúng context
+            try {
+                Object.defineProperty(performance, 'now', {
+                    value: fakePerfNow,
+                    writable: true, configurable: true, enumerable: true
+                });
+            } catch(e){ performance.now = fakePerfNow; }
+
+            log('performance.now hook ✔');
+        } catch(e){ warn('perfNow hook err:',e); }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 6. TIMER HOOK — track toàn bộ setTimeout/setInterval
+    //    của TRANG WEB (không chỉ của script mình)
+    // ─────────────────────────────────────────────────────────
+    function hookTimers() {
+        try {
+            const oST = O.setTimeout;
+            const oSI = O.setInterval;
+            const oCT = O.clearTimeout;
+            const oCI = O.clearInterval;
+            const pn  = O.perfNow;   // dùng original perfNow để đo thật
+
+            // native id → {fid, type, fn, args, deadline, delay, nid}
+            const nidMap = new Map();  // nativeId → fid (để lookup từ clearTimeout)
+
+            function wrapST(fn, delay, ...args) {
+                try {
+                    const d   = (typeof delay==='number'&&isFinite(delay)) ? Math.max(0,delay) : 0;
+                    const fid = seq++;
+                    const dl  = pn() + d;   // deadline theo real time
+                    const nid = oST(function thWrapper() {
+                        try {
+                            timerMap.delete(fid);
+                            nidMap.delete(nid);
+                            if (typeof fn==='function') fn(...args);
+                            else if (typeof fn==='string') (0,eval)(fn);
+                        } catch(e){}
+                    }, d);
+                    timerMap.set(fid, {nid, type:'timeout',  fn, args, deadline:dl, delay:d});
+                    nidMap.set(nid, fid);
+                    return nid;
+                } catch(e){ return oST(fn, delay, ...args); }
+            }
+
+            function wrapSI(fn, delay, ...args) {
+                try {
+                    const d   = (typeof delay==='number'&&isFinite(delay)) ? Math.max(1,delay) : 1;
+                    const fid = seq++;
+                    const nid = oSI(function thIWrapper() {
+                        try {
+                            if (typeof fn==='function') fn(...args);
+                            else if (typeof fn==='string') (0,eval)(fn);
+                        } catch(e){}
+                    }, d);
+                    timerMap.set(fid, {nid, type:'interval', fn, args, delay:d});
+                    nidMap.set(nid, fid);
+                    return nid;
+                } catch(e){ return oSI(fn, delay, ...args); }
+            }
+
+            function wrapCT(id) {
+                try { oCT(id); } catch(e){}
+                const fid = nidMap.get(id);
+                if (fid!=null){ timerMap.delete(fid); nidMap.delete(id); }
+            }
+
+            function wrapCI(id) {
+                try { oCI(id); } catch(e){}
+                const fid = nidMap.get(id);
+                if (fid!=null){ timerMap.delete(fid); nidMap.delete(id); }
+            }
+
+            const def = (k,v) => {
+                try {
+                    Object.defineProperty(window,k,{
+                        value:v, writable:true, configurable:true, enumerable:true
+                    });
+                } catch(e){ window[k]=v; }
+            };
+
+            def('setTimeout',    wrapST);
+            def('setInterval',   wrapSI);
+            def('clearTimeout',  wrapCT);
+            def('clearInterval', wrapCI);
+
+            log('Timer hook ✔');
+        } catch(e){ warn('Timer hook err:',e); }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 7. SKIP 5S — 3 tầng tấn công
+    // ─────────────────────────────────────────────────────────
+    function doSkip5s() {
+        const realNow = O.perfNow();
+        let fired=0, resched=0, ivFired=0;
+
+        // ── Tầng 1: performance.now offset tăng 5s
+        //    → các vòng lặp game/RAF nghĩ rằng 5s đã trôi qua
+        perfOffset += SKIP_MS;
+        log(`perfOffset → ${perfOffset}ms`);
+
+        // ── Tầng 2: fire/reschedule tất cả timeout đang tracked
+        timerMap.forEach((info, fid) => {
+            try {
+                if (info.type === 'timeout') {
+                    const rem = info.deadline - realNow;
+                    if (rem <= SKIP_MS) {
+                        // Fire ngay lập tức
+                        O.clearTimeout(info.nid);
+                        timerMap.delete(fid);
+                        try {
+                            if (typeof info.fn==='function') info.fn(...info.args);
+                            else if (typeof info.fn==='string') (0,eval)(info.fn);
+                        } catch(e){}
+                        fired++;
+                    } else {
+                        // Reschedule sớm hơn 5s
+                        O.clearTimeout(info.nid);
+                        const nd = Math.max(0, rem - SKIP_MS);
+                        const newNid = O.setTimeout(function() {
+                            try {
+                                timerMap.delete(fid);
+                                if (typeof info.fn==='function') info.fn(...info.args);
+                                else if (typeof info.fn==='string') (0,eval)(info.fn);
+                            } catch(e){}
+                        }, nd);
+                        info.nid      = newNid;
+                        info.deadline = realNow + nd;
+                        resched++;
+                    }
+                } else if (info.type === 'interval') {
+                    // Fire interval 1 lần ngay lập tức
+                    try {
+                        if (typeof info.fn==='function') info.fn(...info.args);
+                    } catch(e){}
+                    ivFired++;
+                }
+            } catch(e){}
+        });
+
+        // ── Tầng 3: cascade micro-task flush
+        //    Dùng queueMicrotask + Promise chain để flush event loop
+        try {
+            const flush = ()=>{
+                try { window.dispatchEvent(new CustomEvent('th5:skip',{detail:{fired,resched}})); } catch(e){}
+            };
+            if (typeof queueMicrotask==='function') queueMicrotask(flush);
+            else O.Promise.resolve().then(flush);
+        } catch(e){}
+
+        log(`Skip5s done → fired=${fired} resched=${resched} ivFired=${ivFired} tracked=${timerMap.size}`);
+        updateBadge();
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 8. UI
+    // ─────────────────────────────────────────────────────────
+    function updateBadge() {
+        try {
+            const b = document.getElementById('th5-badge');
+            if (b) b.textContent = `timers: ${timerMap.size} | offset: ${perfOffset}ms`;
+        } catch(e){}
+    }
+
+    const UI = {
+        _drag: {on:false,sx:0,sy:0,ox:0,oy:0},
+
+        init() {
+            try {
+                if (document.getElementById('th5-panel')) return;
+                this._css();
+                this._dom();
+                this._pos();
+                this._sync();
+                log('Panel ✔');
+            } catch(e){ warn('UI err:',e); }
+        },
+
+        _css() {
+            if (document.getElementById('th5-css')) return;
+            const s = document.createElement('style');
+            s.id = 'th5-css';
+            s.textContent = `
+#th5-panel{
+    all:initial;
+    position:fixed !important;
+    z-index:2147483647 !important;
+    width:240px;
+    background:linear-gradient(145deg,#06060f 0%,#0c0c20 55%,#080818 100%);
+    border:1px solid rgba(0,255,180,0.2);
+    border-radius:18px;
+    box-shadow:0 0 0 1px rgba(0,255,180,.04),
+               0 12px 48px rgba(0,0,0,.8),
+               0 0 32px rgba(0,255,180,.06);
+    font-family:'Segoe UI',system-ui,sans-serif !important;
+    color:#fff;
+    overflow:hidden;
+    user-select:none;
+    -webkit-user-select:none;
+    touch-action:none;
+    box-sizing:border-box;
+}
+#th5-hdr{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:11px 14px 10px;
+    background:rgba(0,255,180,.03);
+    border-bottom:1px solid rgba(0,255,180,.07);
+    cursor:grab;box-sizing:border-box;
+}
+#th5-hdr:active{cursor:grabbing;}
+#th5-ttl{
+    font-size:10px;font-weight:800;letter-spacing:2.5px;
+    color:#00ffb4;text-transform:uppercase;
+    display:flex;align-items:center;gap:7px;
+}
+#th5-ttl::before{content:'⚡';font-size:14px;filter:drop-shadow(0 0 6px #00ffb4);}
+#th5-mb{
+    all:unset;width:22px;height:22px;border-radius:50%;
+    background:rgba(0,255,180,.1);border:1px solid rgba(0,255,180,.15);
+    color:#00ffb4;font-size:16px;line-height:22px;text-align:center;
+    cursor:pointer;display:flex;align-items:center;justify-content:center;
+    transition:background .2s;-webkit-tap-highlight-color:transparent;flex-shrink:0;
+}
+#th5-mb:active{background:rgba(0,255,180,.3);}
+#th5-body{
+    padding:14px 14px 16px;max-height:280px;overflow:hidden;
+    transition:max-height .35s cubic-bezier(.4,0,.2,1),
+               padding-top .35s cubic-bezier(.4,0,.2,1),
+               padding-bottom .35s cubic-bezier(.4,0,.2,1);
+    box-sizing:border-box;
+}
+#th5-body.th5-col{max-height:0!important;padding-top:0!important;padding-bottom:0!important;}
+.th5-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:13px;box-sizing:border-box;}
+.th5-lbl{font-size:12px;color:rgba(255,255,255,.83);font-weight:600;line-height:1.35;}
+.th5-sub{font-size:9px;color:rgba(0,255,180,.45);font-weight:400;margin-top:2px;letter-spacing:.3px;}
+/* Switch */
+.th5-sw{position:relative;width:50px;height:28px;flex-shrink:0;}
+.th5-sw input{opacity:0;width:0;height:0;position:absolute;}
+.th5-tk{
+    position:absolute;inset:0;
+    background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);
+    border-radius:28px;cursor:pointer;
+    transition:background .3s,border-color .3s,box-shadow .3s;
+}
+.th5-tk::before{
+    content:'';position:absolute;
+    width:22px;height:22px;top:2px;left:2px;
+    background:rgba(255,255,255,.45);border-radius:50%;
+    box-shadow:0 1px 5px rgba(0,0,0,.5);
+    transition:transform .3s cubic-bezier(.4,0,.2,1),background .3s,box-shadow .3s;
+}
+.th5-sw input:checked+.th5-tk{
+    background:rgba(0,255,180,.18);border-color:rgba(0,255,180,.55);
+    box-shadow:0 0 14px rgba(0,255,180,.28);
+}
+.th5-sw input:checked+.th5-tk::before{
+    transform:translateX(22px);background:#00ffb4;
+    box-shadow:0 0 12px rgba(0,255,180,.9),0 1px 5px rgba(0,0,0,.4);
+}
+.th5-div{height:1px;background:rgba(0,255,180,.07);margin:2px 0 13px;}
+/* Skip button */
+#th5-skip{
+    all:unset;display:block;width:100%;box-sizing:border-box;
+    padding:10px 0;
+    background:linear-gradient(90deg,rgba(0,255,180,.09),rgba(0,150,255,.09));
+    border:1px solid rgba(0,255,180,.22);border-radius:12px;
+    color:#00ffb4;font-size:11px;font-weight:800;
+    letter-spacing:1.8px;text-transform:uppercase;text-align:center;
+    cursor:pointer;transition:box-shadow .2s,transform .15s;
+    -webkit-tap-highlight-color:transparent;
+}
+#th5-skip:active{transform:scale(.97);box-shadow:0 0 22px rgba(0,255,180,.4);}
+#th5-skip.th5-fl{animation:th5fl .5s ease forwards;}
+@keyframes th5fl{
+    0%  {box-shadow:0 0 0   0  rgba(0,255,180,.8);}
+    45% {box-shadow:0 0 28px 6px rgba(0,255,180,.45);}
+    100%{box-shadow:0 0 0   0  rgba(0,255,180,0);}
+}
+#th5-badge{
+    display:block;text-align:center;margin-top:9px;
+    font-size:8.5px;color:rgba(0,255,180,.4);letter-spacing:.5px;
+    background:rgba(0,255,180,.04);border:1px solid rgba(0,255,180,.09);
+    border-radius:7px;padding:3px 0;box-sizing:border-box;
+}
+#th5-st{
+    text-align:center;margi
