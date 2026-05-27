@@ -452,4 +452,205 @@
     border-radius:7px;padding:3px 0;box-sizing:border-box;
 }
 #th5-st{
-    text-align:center;margi
+    text-align:center;margin-top:7px;font-size:9px;
+    letter-spacing:1px;text-transform:uppercase;
+    color:rgba(0,255,180,.3);transition:color .3s;
+}
+#th5-st.on{color:rgba(0,255,180,.85);}
+            `;
+            (document.head || document.documentElement).appendChild(s);
+        },
+
+        _dom() {
+            const p = document.createElement('div');
+            p.id = 'th5-panel';
+            p.innerHTML = `
+<div id="th5-hdr">
+  <div id="th5-ttl">TIME HACKER v5</div>
+  <button id="th5-mb">−</button>
+</div>
+<div id="th5-body">
+  <div class="th5-row">
+    <div class="th5-lbl">Fake +25h<div class="th5-sub">Warp Date + Date.now</div></div>
+    <label class="th5-sw"><input type="checkbox" id="th5-tog"><span class="th5-tk"></span></label>
+  </div>
+  <div class="th5-div"></div>
+  <button id="th5-skip">⚡ SKIP 1S</button>
+  <span id="th5-badge">timers: 0 | offset: 0ms</span>
+  <div id="th5-st">STEALTH ACTIVE</div>
+</div>`;
+            (document.body || document.documentElement).appendChild(p);
+
+            // Toggle
+            const tog = p.querySelector('#th5-tog');
+            tog.addEventListener('change', ()=>{
+                try {
+                    fakeOn = tog.checked;
+                    LS.set(KEY_ON, fakeOn);
+                    this._sync();
+                    log(`Fake +25h → ${fakeOn?'ON ✔':'OFF ✖'}`);
+                } catch(e){}
+            });
+
+            // Skip btn
+            const sb = p.querySelector('#th5-skip');
+            sb.addEventListener('click', ()=>{
+                try {
+                    doSkip5s();
+                    sb.classList.remove('th5-fl');
+                    void sb.offsetWidth;
+                    sb.classList.add('th5-fl');
+                } catch(e){}
+            });
+            sb.addEventListener('touchstart', e=>e.stopPropagation(), {passive:true});
+
+            // Minimize
+            let col=false;
+            const mb   = p.querySelector('#th5-mb');
+            const body = p.querySelector('#th5-body');
+            mb.addEventListener('click', e=>{
+                e.stopPropagation();
+                col=!col;
+                body.classList.toggle('th5-col',col);
+                mb.textContent = col?'+':'−';
+            });
+
+            // Drag
+            this._drag_on(p);
+
+            // Badge refresh — dùng original setInterval
+            O.setInterval(()=>{ try{updateBadge();}catch(e){} }, 800);
+            // Clock refresh
+            O.setInterval(()=>{ try{this._sync();}catch(e){} }, 4000);
+        },
+
+        _sync() {
+            try {
+                const tog = document.getElementById('th5-tog');
+                const st  = document.getElementById('th5-st');
+                if (tog) tog.checked = fakeOn;
+                if (st) {
+                    if (fakeOn) {
+                        const d = new window.Date();
+                        st.textContent = `+25H ON • ${d.toLocaleTimeString()}`;
+                        st.classList.add('on');
+                    } else {
+                        st.textContent = 'STEALTH ACTIVE';
+                        st.classList.remove('on');
+                    }
+                }
+            } catch(e){}
+        },
+
+        _drag_on(panel) {
+            const hdr = panel.querySelector('#th5-hdr');
+            const d   = this._drag;
+
+            const start=(cx,cy)=>{
+                try {
+                    d.on=true;
+                    const r=panel.getBoundingClientRect();
+                    d.sx=cx;d.sy=cy;d.ox=r.left;d.oy=r.top;
+                    panel.style.right='auto';
+                    panel.style.left=d.ox+'px';
+                    panel.style.top=d.oy+'px';
+                    panel.style.transition='none';
+                } catch(e){}
+            };
+            const move=(cx,cy)=>{
+                if(!d.on)return;
+                try {
+                    const x=Math.max(0,Math.min(d.ox+cx-d.sx, window.innerWidth -panel.offsetWidth));
+                    const y=Math.max(0,Math.min(d.oy+cy-d.sy, window.innerHeight-panel.offsetHeight));
+                    panel.style.left=x+'px';
+                    panel.style.top=y+'px';
+                } catch(e){}
+            };
+            const end=()=>{
+                if(!d.on)return;
+                d.on=false;
+                panel.style.transition='';
+                LS.set(KEY_POS,{left:panel.style.left,top:panel.style.top});
+            };
+
+            hdr.addEventListener('mousedown',  e=>{ if(e.target.id==='th5-mb')return; e.preventDefault(); start(e.clientX,e.clientY); });
+            document.addEventListener('mousemove', e=>move(e.clientX,e.clientY),{passive:true});
+            document.addEventListener('mouseup',   end,{passive:true});
+
+            hdr.addEventListener('touchstart', e=>{ if(e.target.id==='th5-mb')return; const t=e.touches[0]; start(t.clientX,t.clientY); },{passive:true});
+            document.addEventListener('touchmove',  e=>{ if(!d.on)return; const t=e.touches[0]; move(t.clientX,t.clientY); },{passive:true});
+            document.addEventListener('touchend',   end,{passive:true});
+        },
+
+        _pos() {
+            try {
+                const pos=LS.get(KEY_POS);
+                const p=document.getElementById('th5-panel');
+                if(!p)return;
+                if(pos&&pos.left&&pos.top){
+                    p.style.right='auto';
+                    p.style.left=pos.left;
+                    p.style.top=pos.top;
+                } else {
+                    p.style.top='70px';
+                    p.style.right='14px';
+                }
+            } catch(e){}
+        },
+    };
+
+    // ─────────────────────────────────────────────────────────
+    // 9. DOM GUARDIAN
+    // ─────────────────────────────────────────────────────────
+    function startGuard() {
+        try {
+            const obs = new MutationObserver(()=>{
+                try {
+                    if(!document.getElementById('th5-panel') && document.body){
+                        warn('Panel removed — restoring');
+                        O.setTimeout(()=>UI.init(), 80);
+                    }
+                } catch(e){}
+            });
+            obs.observe(document.documentElement,{childList:true,subtree:true});
+            log('Guard ✔');
+        } catch(e){ warn('Guard err:',e); }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // 10. BOOT
+    // ─────────────────────────────────────────────────────────
+    (function boot() {
+        try {
+            log('=== v5 boot ===');
+
+            // Hook TRƯỚC tất cả — document-start
+            hookDate();
+            hookPerfNow();
+            hookTimers();
+
+            // Restore state
+            fakeOn = LS.get(KEY_ON, false);
+            log(`state: fakeOn=${fakeOn}`);
+
+            // Mount UI
+            const mount = ()=>{
+                try { UI.init(); startGuard(); } catch(e){ warn('mount err:',e); }
+            };
+
+            if (document.body) {
+                mount();
+            } else if (document.readyState==='loading') {
+                document.addEventListener('DOMContentLoaded', mount, {once:true});
+            } else {
+                // Kiwi fallback polling
+                let n=0;
+                const iv = O.setInterval(()=>{
+                    n++;
+                    if(document.body||n>80){ O.clearInterval(iv); if(document.body) mount(); }
+                }, 80);
+            }
+        } catch(e){ warn('Boot err:',e); }
+    })();
+
+})();
